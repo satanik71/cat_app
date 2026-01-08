@@ -9,13 +9,15 @@ app = Flask(__name__)
 # --- CONFIGURATION ---
 DISPLAY_WIDTH = 800
 DISPLAY_HEIGHT = 480
-CACHE_DURATION = 3600  # Refresh every 1 hour
+
+# 3 Minutes = 180 seconds
+CACHE_DURATION = 180  
 
 BASE_URL = "https://cataas.com"
 
-# Global Cache
+# --- GLOBAL CACHE VARIABLES ---
 last_generation_time = 0
-cached_cat_bytes = None  # Store RAW BYTES now, not the file object
+cached_cat_bytes = None
 
 # 3-Color Palette (Black, White, Red)
 pal_image = Image.new("P", (1, 1))
@@ -28,9 +30,6 @@ pal_image.putpalette(
 )
 
 def fetch_cat_json(tag_mode=True):
-    """
-    Helper to get JSON data from Cataas.
-    """
     headers = {'Accept': 'application/json'}
     if tag_mode:
         url = f"{BASE_URL}/cat/black,white" 
@@ -38,7 +37,7 @@ def fetch_cat_json(tag_mode=True):
         url = f"{BASE_URL}/cat"
 
     try:
-        print(f"Requesting metadata: {url}")
+        # Request metadata
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code == 200:
             return r.json()
@@ -47,9 +46,6 @@ def fetch_cat_json(tag_mode=True):
     return None
 
 def get_best_cat_url():
-    """
-    Finds a suitable cat URL.
-    """
     # Attempt 1 & 2: Try High Contrast (Black/White)
     for _ in range(2):
         data = fetch_cat_json(tag_mode=True)
@@ -72,10 +68,6 @@ def get_best_cat_url():
     return None
 
 def process_cat_image(image_url):
-    """
-    Downloads and processes image. 
-    RETURNS RAW BYTES.
-    """
     try:
         print(f"Downloading image: {image_url}")
         r = requests.get(image_url, timeout=15)
@@ -108,7 +100,7 @@ def process_cat_image(image_url):
         buf = io.BytesIO()
         out.save(buf, format='BMP')
         
-        # CRITICAL FIX: Return the raw bytes value, not the buffer object
+        # Return raw bytes
         return buf.getvalue()
 
     except Exception as e:
@@ -125,21 +117,21 @@ def get_cat_ink():
     
     now = time.time()
     
-    # 1. SERVE FROM CACHE
-    # We check if we have bytes and if time hasn't expired
+    # --- LOGIC START ---
+    
+    # 1. Check if Cache is valid (less than 3 minutes old)
     if cached_cat_bytes and (now - last_generation_time < CACHE_DURATION):
-        print("Serving from cache")
-        # We create a NEW stream from the bytes every time
+        print(f"Serving from cache ({(CACHE_DURATION - (now - last_generation_time)):.0f}s remaining)")
         return send_file(io.BytesIO(cached_cat_bytes), mimetype='image/bmp')
 
-    # 2. GENERATE NEW
+    # 2. Cache expired or empty -> Fetch New
     print("Cache expired. Fetching new cat...")
     cat_url = get_best_cat_url()
     
     if cat_url:
         new_bytes = process_cat_image(cat_url)
         if new_bytes:
-            # Update Global Cache
+            # Update Cache
             cached_cat_bytes = new_bytes
             last_generation_time = now
             return send_file(io.BytesIO(cached_cat_bytes), mimetype='image/bmp')
