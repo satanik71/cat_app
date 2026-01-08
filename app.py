@@ -1,5 +1,7 @@
 import io
 import time
+import random
+import urllib.parse
 import requests
 from flask import Flask, send_file
 from PIL import Image
@@ -9,15 +11,11 @@ app = Flask(__name__)
 # --- CONFIGURATION ---
 DISPLAY_WIDTH = 800
 DISPLAY_HEIGHT = 480
+CACHE_DURATION = 180  # 3 Minutes
 
-# 3 Minutes = 180 seconds
-CACHE_DURATION = 180  
-
-BASE_URL = "https://cataas.com"
-
-# --- GLOBAL CACHE VARIABLES ---
+# --- GLOBAL CACHE ---
 last_generation_time = 0
-cached_cat_bytes = None
+cached_image_bytes = None
 
 # 3-Color Palette (Black, White, Red)
 pal_image = Image.new("P", (1, 1))
@@ -29,54 +27,38 @@ pal_image.putpalette(
     ] + [0, 0, 0] * 253
 )
 
-def fetch_cat_json(tag_mode=True):
-    headers = {'Accept': 'application/json'}
-    if tag_mode:
-        url = f"{BASE_URL}/cat/black,white" 
-    else:
-        url = f"{BASE_URL}/cat"
+# A list of prompts to keep the sketches interesting
+PROMPTS = [
+    "minimalist continuous line drawing of a cat, black ink on white background, red collar",
+    "vector sketch of a cute cat face, simple lines, white background, small red heart",
+    "stippling art style drawing of a cat sleeping, high contrast, white background, red ball of yarn",
+    "pen and ink sketch of a cat sitting on a fence, white background, red bowtie",
+    "japanese ink wash painting of a cat, minimal, white background, red sun in background"
+]
 
+def generate_sketch_url():
+    """Constructs the Pollinations URL for a random sketch"""
+    prompt = random.choice(PROMPTS)
+    encoded_prompt = urllib.parse.quote(prompt)
+    
+    # We add a random seed to ensure a NEW picture every time
+    seed = random.randint(0, 100000)
+    
+    # Requesting slightly larger image to ensure crisp lines when resized
+    return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true&model=flux"
+
+def process_image(image_url):
     try:
-        # Request metadata
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        print(f"Connection Error: {e}")
-    return None
-
-def get_best_cat_url():
-    # Attempt 1 & 2: Try High Contrast (Black/White)
-    for _ in range(2):
-        data = fetch_cat_json(tag_mode=True)
-        if data:
-            if "gif" in data.get("mimetype", ""):
-                continue
-            cat_id = data.get('_id') or data.get('id')
-            if cat_id:
-                return f"{BASE_URL}/cat/{cat_id}?width={DISPLAY_WIDTH}"
-
-    print("High-contrast filter failed. Switching to random fallback.")
-
-    # Attempt 3: Fallback to ANY cat
-    data = fetch_cat_json(tag_mode=False)
-    if data:
-        cat_id = data.get('_id') or data.get('id')
-        if cat_id:
-            return f"{BASE_URL}/cat/{cat_id}?width={DISPLAY_WIDTH}"
-            
-    return None
-
-def process_cat_image(image_url):
-    try:
-        print(f"Downloading image: {image_url}")
-        r = requests.get(image_url, timeout=15)
+        print(f"Generating AI Sketch: {image_url}")
+        # Pollinations can take 3-6 seconds, so we increase timeout
+        r = requests.get(image_url, timeout=30)
         if r.status_code != 200:
+            print(f"Pollinations Error: {r.status_code}")
             return None
             
         img = Image.open(io.BytesIO(r.content)).convert('RGB')
 
-        # Crop to Fill 800x480
+        # 1. Resize & Crop to 800x480
         img_ratio = img.width / img.height
         target_ratio = DISPLAY_WIDTH / DISPLAY_HEIGHT
 
@@ -93,14 +75,13 @@ def process_cat_image(image_url):
             left = (new_width - DISPLAY_WIDTH) // 2
             img = img.crop((left, 0, left + DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
-        # Dither
+        # 2. Dither
+        # Even though it's a sketch, dithering helps smooth the diagonal lines
         out = img.quantize(palette=pal_image, dither=Image.FLOYDSTEINBERG)
         
-        # Save to Bytes
+        # 3. Save to raw bytes
         buf = io.BytesIO()
         out.save(buf, format='BMP')
-        
-        # Return raw bytes
         return buf.getvalue()
 
     except Exception as e:
@@ -109,36 +90,35 @@ def process_cat_image(image_url):
 
 @app.route('/')
 def home():
-    return "Cat Server is Running. Go to /cat-ink"
+    return "Cat Sketch Server Running. Go to /cat-ink"
 
 @app.route('/cat-ink')
 def get_cat_ink():
-    global last_generation_time, cached_cat_bytes
+    global last_generation_time, cached_image_bytes
     
     now = time.time()
     
-    # --- LOGIC START ---
-    
-    # 1. Check if Cache is valid (less than 3 minutes old)
-    if cached_cat_bytes and (now - last_generation_time < CACHE_DURATION):
-        print(f"Serving from cache ({(CACHE_DURATION - (now - last_generation_time)):.0f}s remaining)")
-        return send_file(io.BytesIO(cached_cat_bytes), mimetype='image/bmp')
+    # --- 1. CACHE CHECK ---
+    if cached_image_bytes and (now - last_generation_time < CACHE_DURATION):
+        remaining = CACHE_DURATION - (now - last_generation_time)
+        print(f"Serving Cache ({remaining:.0f}s left)")
+        return send_file(io.BytesIO(cached_image_bytes), mimetype='image/bmp')
 
-    # 2. Cache expired or empty -> Fetch New
-    print("Cache expired. Fetching new cat...")
-    cat_url = get_best_cat_url()
+    # --- 2. GENERATE NEW ---
+    print("Cache expired. Generating new sketch...")
+    url = generate_sketch_url()
     
-    if cat_url:
-        new_bytes = process_cat_image(cat_url)
-        if new_bytes:
-            # Update Cache
-            cached_cat_bytes = new_bytes
-            last_generation_time = now
-            return send_file(io.BytesIO(cached_cat_bytes), mimetype='image/bmp')
-        else:
-            return "Error processing image", 500
+    new_bytes = process_image(url)
     
-    return "Failed to find a cat (API Down?)", 502
+    if new_bytes:
+        cached_image_bytes = new_bytes
+        last_generation_time = now
+        return send_file(io.BytesIO(cached_image_bytes), mimetype='image/bmp')
+    else:
+        # If AI fails, try to serve old cache if it exists, otherwise error
+        if cached_image_bytes:
+             return send_file(io.BytesIO(cached_image_bytes), mimetype='image/bmp')
+        return "Failed to generate sketch", 500
 
 if __name__ == '__main__':
     import os
